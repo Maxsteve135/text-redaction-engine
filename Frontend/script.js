@@ -4,6 +4,7 @@ let redactionSpans = [];
 let processingStartTime = null;
 let currentFileName = '';
 let currentFileType = '';
+let uploadedFileContent = '';
 
 // DOM Elements
 const connectionStatus = document.getElementById('connectionStatus');
@@ -27,11 +28,16 @@ const fileInput = document.getElementById('fileInput');
 const fileUploadArea = document.getElementById('fileUploadArea');
 const fileInfo = document.getElementById('fileInfo');
 const fileName = document.getElementById('fileName');
+const fileStats = document.getElementById('fileStats');
 const clearFileBtn = document.getElementById('clearFileBtn');
 const processedFileName = document.getElementById('processedFileName');
 const downloadTxtBtn = document.getElementById('downloadTxtBtn');
 const downloadPdfBtn = document.getElementById('downloadPdfBtn');
 const copyRedactedBtn = document.getElementById('copyRedactedBtn');
+const printBtn = document.getElementById('printBtn');
+const progressContainer = document.getElementById('progressContainer');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
 
 // API Configuration
 const API_BASE = 'https://text-redaction-engine-backend.onrender.com';
@@ -43,93 +49,144 @@ document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     updateTextStats();
     updateRulePreviews();
+    
+    // Auto-save input every 5 seconds
+    setInterval(saveToLocalStorage, 5000);
+    
+    // Load saved data
     loadFromLocalStorage();
 });
 
-// Backend Connection
+// Backend Connection Check
 async function checkBackendConnection() {
     try {
+        updateConnectionStatus('connecting', 'Connecting to backend...');
         const response = await fetch(`${API_BASE}/health`);
         if (response.ok) {
+            const data = await response.json();
             updateConnectionStatus('connected', 'Backend connected');
             isBackendConnected = true;
+            redactBtn.disabled = false;
+            autoDetectBtn.disabled = false;
+            loadExampleBtn.disabled = false;
+            fileInput.disabled = false;
         } else {
             throw new Error('Backend not responding');
         }
     } catch (error) {
         updateConnectionStatus('disconnected', 'Backend offline');
         isBackendConnected = false;
-        showToast('Using client-side detection only', 'warning');
+        redactBtn.disabled = true;
+        autoDetectBtn.disabled = true;
+        loadExampleBtn.disabled = true;
+        fileInput.disabled = true;
+        showToast('⚠️ Backend server is offline. Using client-side detection only.', 'warning');
+        
+        // Retry every 10 seconds
+        setTimeout(checkBackendConnection, 10000);
     }
 }
 
 function updateConnectionStatus(status, message) {
     connectionStatus.innerHTML = `<i class="fas fa-circle"></i> ${message}`;
-    const icon = connectionStatus.querySelector('.fa-circle');
-    
-    if (status === 'connected') {
-        icon.style.color = '#10b981';
-    } else if (status === 'disconnected') {
-        icon.style.color = '#ef4444';
-    } else {
-        icon.style.color = '#f59e0b';
-    }
+    connectionStatus.className = 'connection-status ' + status;
 }
 
 // Event Listeners
 function setupEventListeners() {
-    // Text input
-    inputText.addEventListener('input', updateTextStats);
+    // Text input events
+    inputText.addEventListener('input', () => {
+        updateTextStats();
+        saveToLocalStorage();
+    });
     
-    // File upload
+    // Clear text button
+    clearTextBtn.addEventListener('click', clearText);
+    
+    // Load example button
+    loadExampleBtn.addEventListener('click', loadExample);
+    
+    // Rule change events
+    document.querySelectorAll('input[type="radio"][name$="Rule"]').forEach(radio => {
+        radio.addEventListener('change', updateRulePreviews);
+    });
+    
+    // Button events
+    redactBtn.addEventListener('click', performRedaction);
+    autoDetectBtn.addEventListener('click', autoDetectAndPreview);
+    
+    // File upload events
+    setupFileUploadListeners();
+    
+    // Download and copy buttons
+    downloadTxtBtn.addEventListener('click', downloadAsTxt);
+    downloadPdfBtn.addEventListener('click', downloadAsPdf);
+    copyRedactedBtn.addEventListener('click', copyRedactedToClipboard);
+    printBtn.addEventListener('click', printRedacted);
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            if (!redactBtn.disabled) {
+                performRedaction();
+            }
+        }
+        
+        if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+            e.preventDefault();
+            if (!autoDetectBtn.disabled) {
+                autoDetectAndPreview();
+            }
+        }
+        
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            downloadAsTxt();
+        }
+        
+        if (e.key === 'Escape') {
+            clearText();
+        }
+    });
+}
+
+// File Upload Setup
+function setupFileUploadListeners() {
+    // Click to upload
     fileUploadArea.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', handleFileUpload);
-    clearFileBtn.addEventListener('click', clearUploadedFile);
     
     // Drag and drop
     fileUploadArea.addEventListener('dragover', (e) => {
         e.preventDefault();
-        fileUploadArea.style.borderColor = '#3b82f6';
-        fileUploadArea.style.background = '#f0f9ff';
+        fileUploadArea.classList.add('drag-over');
     });
     
     fileUploadArea.addEventListener('dragleave', () => {
-        fileUploadArea.style.borderColor = '#d1d5db';
-        fileUploadArea.style.background = '#f9fafb';
+        fileUploadArea.classList.remove('drag-over');
     });
     
     fileUploadArea.addEventListener('drop', (e) => {
         e.preventDefault();
-        fileUploadArea.style.borderColor = '#d1d5db';
-        fileUploadArea.style.background = '#f9fafb';
+        fileUploadArea.classList.remove('drag-over');
         
         if (e.dataTransfer.files.length > 0) {
-            handleFileUpload({ target: { files: e.dataTransfer.files } });
+            handleFileUpload(e.dataTransfer.files[0]);
         }
     });
     
-    // Buttons
-    clearTextBtn.addEventListener('click', clearText);
-    loadExampleBtn.addEventListener('click', loadExample);
-    autoDetectBtn.addEventListener('click', autoDetectAndPreview);
-    redactBtn.addEventListener('click', performRedaction);
-    
-    // Download buttons
-    downloadTxtBtn.addEventListener('click', downloadAsTxt);
-    downloadPdfBtn.addEventListener('click', downloadAsPdf);
-    copyRedactedBtn.addEventListener('click', copyRedactedToClipboard);
-    
-    // Rules
-    document.querySelectorAll('input[type="radio"]').forEach(radio => {
-        radio.addEventListener('change', updateRulePreviews);
+    // File input change
+    fileInput.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            handleFileUpload(e.target.files[0]);
+        }
     });
+    
+    // Clear file button
+    clearFileBtn.addEventListener('click', clearUploadedFile);
 }
 
-// File Upload
-async function handleFileUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    
+async function handleFileUpload(file) {
     currentFileName = file.name;
     currentFileType = file.type || file.name.split('.').pop().toLowerCase();
     
@@ -139,6 +196,7 @@ async function handleFileUpload(event) {
         return;
     }
     
+    // Show loading
     showLoading(`Processing ${file.name}...`);
     
     try {
@@ -148,42 +206,67 @@ async function handleFileUpload(event) {
             text = await readTextFile(file);
         } else if (currentFileType.includes('pdf')) {
             text = await extractTextFromPDF(file);
-        } else if (currentFileType.includes('docx')) {
+        } else if (currentFileType.includes('docx') || currentFileType.includes('word')) {
             text = await extractTextFromDOCX(file);
+        } else if (currentFileType.includes('rtf')) {
+            text = await extractTextFromRTF(file);
         } else {
             showToast('Unsupported file format', 'error');
             hideLoading();
             return;
         }
         
+        // Update text area
         inputText.value = text;
+        uploadedFileContent = text;
         updateTextStats();
-        
-        // Show file info
+      // Continue from handleFileUpload function...
+
+        // Update file info display
         fileName.textContent = currentFileName;
+        updateFileStats(file, text.length);
         fileInfo.style.display = 'block';
+        fileUploadArea.style.display = 'none';
+        
+        // Update processed file name
         processedFileName.textContent = currentFileName;
         
         showToast(`File "${currentFileName}" loaded successfully!`, 'success');
         
     } catch (error) {
         console.error('Error processing file:', error);
-        showToast('Error processing file', 'error');
+        showToast('Error processing file. Please try a different format.', 'error');
     } finally {
         hideLoading();
     }
+}
+
+function updateFileStats(file, textLength) {
+    const fileSize = formatFileSize(file.size);
+    const wordCount = inputText.value.trim() ? inputText.value.trim().split(/\s+/).length : 0;
+    
+    fileStats.innerHTML = `
+        <span><i class="fas fa-weight-hanging"></i> Size: ${fileSize}</span>
+        <span><i class="fas fa-font"></i> Characters: ${textLength}</span>
+        <span><i class="fas fa-file-word"></i> Words: ${wordCount}</span>
+    `;
 }
 
 function clearUploadedFile() {
     fileInput.value = '';
     currentFileName = '';
     currentFileType = '';
+    uploadedFileContent = '';
+    
     fileInfo.style.display = 'none';
+    fileUploadArea.style.display = 'block';
     processedFileName.textContent = 'Manual Input';
+    
+    showToast('File cleared', 'info');
 }
 
-// File Processing
-function readTextFile(file) {
+// File Processing Functions
+async function readTextFile(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (e) => resolve(e.target.result);
@@ -193,13 +276,88 @@ function readTextFile(file) {
 }
 
 async function extractTextFromPDF(file) {
-    showToast('PDF extraction is limited. Use TXT for best results.', 'warning');
-    return await readTextFile(file);
+    try {
+        // For PDF extraction, we need to use a library
+        // Since we don't have PDF.js loaded, we'll show a message
+        showToast('PDF extraction requires additional libraries. Please use TXT or DOCX files for now.', 'warning');
+        hideLoading();
+        
+        // Return empty string for now
+        return 'PDF extraction requires PDF.js library. Please convert to text file first.';
+        
+        // Uncomment below when PDF.js is properly included:
+        /*
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        let fullText = '';
+        
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += pageText + '\n';
+        }
+        
+        return fullText;
+        */
+    } catch (error) {
+        throw new Error('PDF extraction failed');
+    }
 }
 
 async function extractTextFromDOCX(file) {
-    showToast('DOCX extraction is basic. Use TXT for best results.', 'warning');
-    return await readTextFile(file);
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        
+        // Simple DOCX extraction (extracts text from the Word document)
+        // This is a basic implementation - in production you'd want a proper library
+        const data = new Uint8Array(arrayBuffer);
+        let text = '';
+        
+        // Look for text between <w:t> tags in the DOCX XML (simplified approach)
+        const decoder = new TextDecoder('utf-8');
+        const content = decoder.decode(data);
+        
+        // Simple regex to extract text from DOCX (this is very basic)
+        const textMatches = content.match(/<w:t[^>]*>([^<]+)<\/w:t>/g);
+        if (textMatches) {
+            text = textMatches.map(match => {
+                return match.replace(/<[^>]+>/g, '');
+            }).join(' ');
+        }
+        
+        if (!text) {
+            // Fallback: try to extract any readable text
+            text = content.replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+        }
+        
+        return text || 'Unable to extract text from DOCX file. Please try a TXT file.';
+    } catch (error) {
+        console.error('DOCX extraction error:', error);
+        return 'Error extracting text from DOCX file. Please try a TXT file.';
+    }
+}
+
+async function extractTextFromRTF(file) {
+    try {
+        const text = await readTextFile(file);
+        // Simple RTF text extraction - remove RTF control words
+        return text
+            .replace(/\\[a-z]+\d*\s?/g, ' ')  // Remove RTF control words
+            .replace(/[{}]/g, ' ')             // Remove braces
+            .replace(/\s+/g, ' ')              // Normalize whitespace
+            .trim();
+    } catch (error) {
+        throw new Error('RTF extraction failed');
+    }
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 // Text Statistics
@@ -212,41 +370,53 @@ function updateTextStats() {
     charCount.textContent = `Characters: ${chars}`;
     wordCount.textContent = `Words: ${words}`;
     lineCount.textContent = `Lines: ${lines}`;
-    
-    saveToLocalStorage();
 }
 
-// Load Example
+// Load Example Text
 function loadExample() {
     const exampleText = `Hello, my name is John Doe. You can contact me at john.doe@company.com or call me at (555) 123-4567. My SSN is 123-45-6789 and my account number is 9876543210.
 
 You can also reach my colleague Jane Smith at jane.smith@example.org or (444) 555-6677. Her credit card is 4111-1111-1111-1111.
 
-Our office address is 123 Business Street, Suite 500, New York, NY 10001. For billing inquiries, contact billing@company.com or call 1-800-555-0199.`;
-    
+Our office address is 123 Business Street, Suite 500, New York, NY 10001. For billing inquiries, contact billing@company.com or call 1-800-555-0199.
+
+Additional contact: support@helpdesk.com | Emergency: 911
+Customer ID: 8765432109 | Reference: A1B2C3D4E5`;
+
     inputText.value = exampleText;
     updateTextStats();
-    showToast('Example text loaded', 'success');
+    saveToLocalStorage();
+    showToast('Example text loaded successfully!', 'success');
 }
 
 // Clear Text
 function clearText() {
     inputText.value = '';
     updateTextStats();
+    saveToLocalStorage();
     showToast('Text cleared', 'info');
+    
+    // Clear results if shown
+    resultsSection.style.display = 'none';
+    originalPreview.textContent = 'No text processed yet.';
+    redactedPreview.textContent = 'No text processed yet.';
 }
 
-// Rule Previews
+// Rule Preview Updates
 function updateRulePreviews() {
+    // Email preview
     const emailRule = document.querySelector('input[name="emailRule"]:checked').value;
     document.getElementById('emailPreview').textContent = getPreviewText('john.doe@example.com', emailRule, 'EMAIL');
     
+    // Phone preview
     const phoneRule = document.querySelector('input[name="phoneRule"]:checked').value;
     document.getElementById('phonePreview').textContent = getPreviewText('(555) 123-4567', phoneRule, 'PHONE');
     
+    // SSN preview
     const ssnRule = document.querySelector('input[name="ssnRule"]:checked').value;
     document.getElementById('ssnPreview').textContent = getPreviewText('123-45-6789', ssnRule, 'SSN');
     
+    // Account preview
     const accountRule = document.querySelector('input[name="accountRule"]:checked').value;
     document.getElementById('accountPreview').textContent = getPreviewText('9876543210', accountRule, 'ACCOUNT');
 }
@@ -258,7 +428,8 @@ function getPreviewText(text, rule, type) {
         case 'PARTIAL':
             if (text.length <= 4) return '█'.repeat(text.length);
             const lastFour = text.slice(-4);
-            return '█'.repeat(text.length - 4) + lastFour;
+            const masked = '█'.repeat(text.length - 4);
+            return masked + lastFour;
         case 'TOKEN':
             const tokens = {
                 'EMAIL': '[EMAIL_REDACTED]',
@@ -268,11 +439,11 @@ function getPreviewText(text, rule, type) {
             };
             return tokens[type] || '[REDACTED]';
         default:
-            return text;
+            return '█'.repeat(text.length);
     }
 }
 
-// Auto Detect
+// Auto-detection (Client-side fallback)
 function autoDetectAndPreview() {
     const text = inputText.value.trim();
     if (!text) {
@@ -283,18 +454,19 @@ function autoDetectAndPreview() {
     redactionSpans = detectSensitiveData(text);
     
     if (redactionSpans.length === 0) {
-        showToast('No sensitive data detected', 'info');
+        showToast('No sensitive data detected in the text', 'info');
         return;
     }
     
+    // Show preview with client-side detection
     showPreview(text, redactionSpans);
-    showToast(`Detected ${redactionSpans.length} sensitive items`, 'success');
+    showToast(`Detected ${redactionSpans.length} sensitive items (client-side)`, 'success');
 }
 
 function detectSensitiveData(text) {
     const spans = [];
     
-    // Email
+    // Email detection
     const emailRegex = /[\w.%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     let match;
     while ((match = emailRegex.exec(text)) !== null) {
@@ -307,7 +479,7 @@ function detectSensitiveData(text) {
         });
     }
     
-    // Phone
+    // Phone number detection (US format)
     const phoneRegex = /(\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g;
     while ((match = phoneRegex.exec(text)) !== null) {
         spans.push({
@@ -319,7 +491,7 @@ function detectSensitiveData(text) {
         });
     }
     
-    // SSN
+    // SSN detection
     const ssnRegex = /\d{3}-\d{2}-\d{4}/g;
     while ((match = ssnRegex.exec(text)) !== null) {
         spans.push({
@@ -331,9 +503,21 @@ function detectSensitiveData(text) {
         });
     }
     
-    // Account
+    // Account number detection (8-12 digits)
     const accountRegex = /\b\d{8,12}\b/g;
     while ((match = accountRegex.exec(text)) !== null) {
+        spans.push({
+            start: match.index,
+            end: match.index + match[0].length,
+            type: 'ACCOUNT',
+            originalText: match[0],
+            rule: document.querySelector('input[name="accountRule"]:checked').value
+        });
+    }
+    
+    // Credit card detection (simplified)
+    const creditCardRegex = /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g;
+    while ((match = creditCardRegex.exec(text)) !== null) {
         spans.push({
             start: match.index,
             end: match.index + match[0].length,
@@ -346,34 +530,52 @@ function detectSensitiveData(text) {
     return spans;
 }
 
-// Show Preview
+// Preview Display
 function showPreview(originalText, spans) {
-    // Original with highlights
+    // Display original text with highlights
     let originalHTML = escapeHtml(originalText);
+    
+    // Sort spans by start position (descending) for proper highlighting
     const sortedSpans = [...spans].sort((a, b) => b.start - a.start);
     
     sortedSpans.forEach(span => {
         const before = originalHTML.substring(0, span.start);
         const match = originalHTML.substring(span.start, span.end);
         const after = originalHTML.substring(span.end);
-        originalHTML = `${before}<span class="redacted" title="${span.type}">${match}</span>${after}`;
+        
+        originalHTML = `${before}<span class="redacted" title="${span.type}: ${span.originalText}">${match}</span>${after}`;
     });
     
     originalPreview.innerHTML = originalHTML;
     
-    // Redacted text
+    // Generate redacted text
     let redactedText = originalText;
     sortedSpans.forEach(span => {
         const redactedPart = applyRedactionRule(span.originalText, span.rule, span.type);
         redactedText = redactedText.substring(0, span.start) + redactedPart + redactedText.substring(span.end);
+        
+        // Adjust subsequent spans positions
+        for (let i = 0; i < sortedSpans.length; i++) {
+            if (sortedSpans[i].start > span.start) {
+                sortedSpans[i].start += redactedPart.length - span.originalText.length;
+                sortedSpans[i].end += redactedPart.length - span.originalText.length;
+            }
+        }
     });
     
     currentRedactedText = redactedText;
     redactedPreview.textContent = redactedText;
     
-    // Show results
+    // Update counts
+    const originalCount = document.getElementById('originalCount');
+    const redactedCount = document.getElementById('redactedCount');
+    
+    originalCount.textContent = `${spans.length} items`;
+    redactedCount.textContent = `${spans.length} redacted`;
+    
+    // Show results section
     resultsSection.style.display = 'block';
-    redactionCount.textContent = spans.length;
+    redactionCount.textContent = `${spans.length} redaction${spans.length !== 1 ? 's' : ''}`;
 }
 
 function applyRedactionRule(text, rule, type) {
@@ -383,7 +585,8 @@ function applyRedactionRule(text, rule, type) {
         case 'PARTIAL':
             if (text.length <= 4) return '█'.repeat(text.length);
             const lastFour = text.slice(-4);
-            return '█'.repeat(text.length - 4) + lastFour;
+            const masked = '█'.repeat(text.length - 4);
+            return masked + lastFour;
         case 'TOKEN':
             const tokens = {
                 'EMAIL': '[EMAIL_REDACTED]',
@@ -393,18 +596,20 @@ function applyRedactionRule(text, rule, type) {
             };
             return tokens[type] || '[REDACTED]';
         default:
-            return text;
+            return '█'.repeat(text.length);
     }
 }
 
-// Main Redaction
+// Main Redaction Function
 async function performRedaction() {
     const text = inputText.value.trim();
+    
     if (!text) {
         showToast('Please enter some text first', 'warning');
         return;
     }
     
+    // Get current rule settings
     const rules = {
         email: document.querySelector('input[name="emailRule"]:checked').value,
         phone: document.querySelector('input[name="phoneRule"]:checked').value,
@@ -412,78 +617,82 @@ async function performRedaction() {
         account: document.querySelector('input[name="accountRule"]:checked').value
     };
     
+    // Show loading overlay
     showLoading('Processing text...');
     processingStartTime = Date.now();
     
     try {
         let result;
-        // Complete the performRedaction function and add remaining functions...
-
-if (isBackendConnected) {
-    const response = await fetch(`${API_BASE}/redact`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            text: text,
-            rules: rules
-        })
-    });
-    
-    if (!response.ok) {
-        throw new Error('Backend error');
+        
+        if (isBackendConnected) {
+            // Try backend first
+            const response = await fetch(`${API_BASE}/redact`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: text,
+                    rules: rules
+                }),
+                timeout: 15000 // 15 second timeout
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Backend responded with status: ${response.status}`);
+            }
+            
+            result = await response.json();
+            redactionSpans = result.redaction_spans || [];
+            currentRedactedText = result.redacted_text || '';
+            
+        } else {
+            // Fallback to client-side detection
+            throw new Error('Backend not connected');
+        }
+        
+        // Display results
+        if (redactionSpans.length > 0) {
+            showPreview(text, redactionSpans);
+        } else if (currentRedactedText) {
+            // If backend returned redacted text but no spans
+            originalPreview.textContent = text;
+            redactedPreview.textContent = currentRedactedText;
+            resultsSection.style.display = 'block';
+            redactionCount.textContent = '0 redactions';
+        } else {
+            showToast('No sensitive data detected', 'info');
+        }
+        
+        // Update processing time
+        if (processingStartTime) {
+            const elapsed = Date.now() - processingStartTime;
+            processingTime.textContent = `${elapsed}ms`;
+        }
+        
+        hideLoading();
+        
+    } catch (error) {
+        console.error('Redaction error:', error);
+        
+        // Fallback to client-side detection
+        showToast('Using client-side detection (backend unavailable)', 'warning');
+        redactionSpans = detectSensitiveData(text);
+        
+        if (redactionSpans.length > 0) {
+            showPreview(text, redactionSpans);
+            showToast(`Redacted ${redactionSpans.length} items (client-side)`, 'success');
+        } else {
+            showToast('No sensitive data detected', 'info');
+        }
+        
+        if (processingStartTime) {
+            const elapsed = Date.now() - processingStartTime;
+            processingTime.textContent = `${elapsed}ms (client-side)`;
+        }
+        
+        hideLoading();
     }
-    
-    result = await response.json();
-    redactionSpans = result.redaction_spans || [];
-    currentRedactedText = result.redacted_text || '';
-    
-} else {
-    throw new Error('Backend not connected');
-}
-
-// Display results
-if (redactionSpans.length > 0) {
-    showPreview(text, redactionSpans);
-} else if (currentRedactedText) {
-    originalPreview.textContent = text;
-    redactedPreview.textContent = currentRedactedText;
-    resultsSection.style.display = 'block';
-    redactionCount.textContent = '0';
-} else {
-    showToast('No sensitive data detected', 'info');
-}
-
-// Update processing time
-if (processingStartTime) {
-    const elapsed = Date.now() - processingStartTime;
-    processingTime.textContent = `${elapsed}ms`;
-}
-
-hideLoading();
-
-} catch (error) {
-    console.error('Redaction error:', error);
-    
-    // Fallback to client-side
-    showToast('Using client-side detection', 'warning');
-    redactionSpans = detectSensitiveData(text);
-    
-    if (redactionSpans.length > 0) {
-        showPreview(text, redactionSpans);
-        showToast(`Redacted ${redactionSpans.length} items`, 'success');
-    } else {
-        showToast('No sensitive data detected', 'info');
-    }
-    
-    if (processingStartTime) {
-        const elapsed = Date.now() - processingStartTime;
-        processingTime.textContent = `${elapsed}ms (client-side)`;
-    }
-    
-    hideLoading();
-}
 }
 
 // Download Functions
@@ -507,49 +716,89 @@ function downloadAsTxt() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     
-    showToast('Downloaded as TXT', 'success');
+    showToast('Redacted text downloaded as TXT!', 'success');
 }
 
-function downloadAsPdf() {
+async function downloadAsPdf() {
     if (!currentRedactedText) {
         showToast('Please redact text first', 'warning');
         return;
     }
     
-    showLoading('Creating PDF...');
+    showLoading('Generating PDF...');
     
     try {
         const fileName = currentFileName 
             ? `redacted_${currentFileName.replace(/\.[^/.]+$/, '')}.pdf`
             : 'redacted_text.pdf';
         
+        // Using pdfmake for PDF generation
         const documentDefinition = {
             content: [
-                { text: 'Redacted Document', style: 'header' },
-                { text: 'Generated by Text Redaction Engine', style: 'subheader' },
-                { text: `Original File: ${currentFileName || 'Manual Input'}` },
-                { text: ' ', margin: [0, 20] },
-                { text: currentRedactedText, style: 'content' },
-                { text: ' ', margin: [0, 20] },
-                { text: `Redactions: ${redactionSpans.length}` },
-                { text: `Generated: ${new Date().toLocaleString()}` }
+                {
+                    text: 'Redacted Document',
+                    style: 'header',
+                    margin: [0, 0, 0, 20]
+                },
+                {
+                    text: 'Generated by Text Redaction Engine',
+                    style: 'subheader',
+                    margin: [0, 0, 0, 10]
+                },
+                {
+                    text: 'Original File: ' + (currentFileName || 'Manual Input'),
+                    margin: [0, 0, 0, 20]
+                },
+                {
+                    text: currentRedactedText,
+                    style: 'body',
+                    margin: [0, 0, 0, 20]
+                },
+                {
+                    text: `Generated on: ${new Date().toLocaleString()}`,
+                    style: 'footer',
+                    margin: [0, 20, 0, 0]
+                },
+                {
+                    text: `Redactions Applied: ${redactionSpans.length}`,
+                    style: 'footer'
+                }
             ],
             styles: {
-                header: { fontSize: 18, bold: true, margin: [0, 0, 0, 10] },
-                subheader: { fontSize: 12, color: '#666', margin: [0, 0, 0, 20] },
-                content: { fontSize: 11, lineHeight: 1.5 }
+                header: {
+                    fontSize: 18,
+                    bold: true,
+                    alignment: 'center'
+                },
+                subheader: {
+                    fontSize: 12,
+                    italics: true,
+                    alignment: 'center',
+                    color: '#666'
+                },
+                body: {
+                    fontSize: 10,
+                    lineHeight: 1.5
+                },
+                footer: {
+                    fontSize: 8,
+                    color: '#888'
+                }
+            },
+            defaultStyle: {
+                font: 'Helvetica'
             }
         };
         
         pdfMake.createPdf(documentDefinition).download(fileName);
         
         hideLoading();
-        showToast('Downloaded as PDF', 'success');
+        showToast('Redacted text downloaded as PDF!', 'success');
         
     } catch (error) {
-        console.error('PDF error:', error);
+        console.error('PDF generation error:', error);
         hideLoading();
-        showToast('PDF creation failed', 'error');
+        showToast('Error generating PDF. Try downloading as TXT instead.', 'error');
     }
 }
 
@@ -559,12 +808,56 @@ function copyRedactedToClipboard() {
         return;
     }
     
-    navigator.clipboard.writeText(currentRedactedText)
-        .then(() => showToast('Copied to clipboard', 'success'))
-        .catch(() => showToast('Copy failed', 'error'));
+    navigator.clipboard.writeText(currentRedactedText).then(() => {
+        showToast('Redacted text copied to clipboard!', 'success');
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
+        showToast('Failed to copy to clipboard', 'error');
+    });
 }
 
-// Loading Functions
+function printRedacted() {
+    if (!currentRedactedText) {
+        showToast('Please redact text first', 'warning');
+        return;
+    }
+    
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+        <html>
+            <head>
+                <title>Redacted Document</title>
+                <style>
+                    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 2cm; }
+                    h1 { color: #333; border-bottom: 2px solid #ccc; padding-bottom: 10px; }
+                    .meta { color: #666; margin-bottom: 20px; }
+                    .content { white-space: pre-wrap; font-family: monospace; background: #f5f5f5; padding: 20px; border-radius: 5px; }
+                    .footer { margin-top: 30px; color: #999; font-size: 12px; border-top: 1px solid #eee; padding-top: 10px; }
+                </style>
+            </head>
+            <body>
+                <h1>Redacted Document</h1>
+                <div class="meta">
+                    <p><strong>Original File:</strong> ${currentFileName || 'Manual Input'}</p>
+                    <p><strong>Redactions Applied:</strong> ${redactionSpans.length}</p>
+                    <p><strong>Generated:</strong> ${new Date().toLocaleString()}</p>
+                </div>
+                <div class="content">${escapeHtml(currentRedactedText)}</div>
+                <div class="footer">
+                    <p>Generated by Text Redaction Engine</p>
+                </div>
+            </body>
+        </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+        printWindow.print();
+        printWindow.close();
+    }, 250);
+}
+
+// Loading Overlay Functions
 function showLoading(message = 'Processing...') {
     loadingMessage.textContent = message;
     loadingOverlay.style.display = 'flex';
@@ -575,33 +868,46 @@ function hideLoading() {
     processingStartTime = null;
 }
 
-// Toast Function
+// Toast Notification
 function showToast(message, type = 'info') {
-    if (toast.timeoutId) clearTimeout(toast.timeoutId);
+    // Clear any existing timeout
+    if (toast.timeoutId) {
+        clearTimeout(toast.timeoutId);
+    }
     
+    // Set message and style
     toast.textContent = message;
     toast.className = 'toast show';
     
+    // Add icon based on type
+    let icon = 'ℹ️';
     switch(type) {
         case 'success':
-            toast.style.background = '#10b981';
+            icon = '✅';
+            toast.style.backgroundColor = '#10b981';
             break;
         case 'warning':
-            toast.style.background = '#f59e0b';
+            icon = '⚠️';
+            toast.style.backgroundColor = '#f59e0b';
             break;
         case 'error':
-            toast.style.background = '#ef4444';
+            icon = '❌';
+            toast.style.backgroundColor = '#ef4444';
             break;
         default:
-            toast.style.background = '#3b82f6';
+            icon = 'ℹ️';
+            toast.style.backgroundColor = '#3b82f6';
     }
     
+    toast.innerHTML = `${icon} ${message}`;
+    
+    // Auto-hide after 3 seconds
     toast.timeoutId = setTimeout(() => {
         toast.className = 'toast';
     }, 3000);
 }
 
-// Local Storage
+// Local Storage Functions
 function saveToLocalStorage() {
     const data = {
         text: inputText.value,
@@ -611,44 +917,52 @@ function saveToLocalStorage() {
             ssn: document.querySelector('input[name="ssnRule"]:checked').value,
             account: document.querySelector('input[name="accountRule"]:checked').value
         },
-        fileName: currentFileName
+        fileName: currentFileName,
+        fileType: currentFileType
     };
     
     try {
-        localStorage.setItem('redactorData', JSON.stringify(data));
+        localStorage.setItem('textRedactorData', JSON.stringify(data));
     } catch (error) {
-        console.warn('Save failed:', error);
+        console.warn('Could not save to localStorage:', error);
     }
 }
 
 function loadFromLocalStorage() {
     try {
-        const saved = localStorage.getItem('redactorData');
-        if (saved) {
-            const data = JSON.parse(saved);
+        const savedData = localStorage.getItem('textRedactorData');
+        if (savedData) {
+            const data = JSON.parse(savedData);
             
+            // Restore text
             if (data.text) {
                 inputText.value = data.text;
                 updateTextStats();
             }
             
+            // Restore rules
             if (data.rules) {
                 Object.keys(data.rules).forEach(ruleType => {
-                    const radio = document.querySelector(`input[name="${ruleType}Rule"][value="${data.rules[ruleType]}"]`);
-                    if (radio) radio.checked = true;
+                    const selector = `input[name="${ruleType}Rule"][value="${data.rules[ruleType]}"]`;
+                    const radio = document.querySelector(selector);
+                    if (radio) {
+                        radio.checked = true;
+                    }
                 });
                 updateRulePreviews();
             }
             
+            // Restore file info
             if (data.fileName) {
                 currentFileName = data.fileName;
+                currentFileType = data.fileType;
                 processedFileName.textContent = currentFileName;
             }
             
-            showToast('Session restored', 'info');
+            showToast('Restored previous session', 'info');
         }
     } catch (error) {
-        console.warn('Load failed:', error);
+        console.warn('Could not load from localStorage:', error);
     }
 }
 
@@ -659,24 +973,13 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Shortcut Keys
-document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        e.preventDefault();
-        if (!redactBtn.disabled) performRedaction();
-    }
+// Update progress bar (for future use)
+function updateProgress(percent, message = '') {
+    progressContainer.style.display = 'block';
+    progressFill.style.width = `${percent}%`;
+    progressText.textContent = `${percent}%`;
     
-    if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
-        e.preventDefault();
-        if (!autoDetectBtn.disabled) autoDetectAndPreview();
+    if (message) {
+        loadingMessage.textContent = message;
     }
-    
-    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-        e.preventDefault();
-        downloadAsTxt();
-    }
-    
-    if (e.key === 'Escape') {
-        clearText();
-    }
-});
+}
